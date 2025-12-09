@@ -1,0 +1,56 @@
+services:
+  xinference:
+    build:
+      context: .
+    image: wan2-2-i2v-a14b-xinference:latest
+    ports:
+      - "${XINFERENCE_PORT:-9997}:9997"
+    environment:
+      XINFERENCE_PORT: ${XINFERENCE_PORT:-9997}
+      XINFERENCE_HOST: 0.0.0.0
+      XINFERENCE_HOME: /data
+      XINFERENCE_MODEL_SRC: ${XINFERENCE_MODEL_SRC:-huggingface}
+      ENABLE_S3_MODEL: ${ENABLE_S3_MODEL:-1}
+      MODEL_S3_BUCKET: ${MODEL_S3_BUCKET:-noty3emlmi}
+      MODEL_S3_PREFIX: ${MODEL_S3_PREFIX:-wan2.2-i2v-a14b/}
+      MODEL_S3_ENDPOINT: ${MODEL_S3_ENDPOINT:-https://s3api-eu-ro-1.runpod.io}
+      MODEL_S3_REGION: ${MODEL_S3_REGION:-us-east-1}
+      MODEL_REQUIRE_KEYS: ${MODEL_REQUIRE_KEYS:-}
+      MODEL_LOCAL_PATH: ${MODEL_LOCAL_PATH:-/data/models/wan2.2-i2v-a14b}
+      MODEL_SKIP_EXISTING: ${MODEL_SKIP_EXISTING:-1}
+      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID:-}
+      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY:-}
+      AUTO_LAUNCH_MODEL: ${AUTO_LAUNCH_MODEL:-1}
+      VIDEO_MODEL_NAME: ${VIDEO_MODEL_NAME:-wan2.2-i2v-a14b}
+      VIDEO_MODEL_TYPE: video
+      VIDEO_MODEL_ENGINE: ${VIDEO_MODEL_ENGINE:-}
+      VIDEO_MODEL_FORMAT: ${VIDEO_MODEL_FORMAT:-}
+      VIDEO_MODEL_PATH: ${VIDEO_MODEL_PATH:-/data/models/wan2.2-i2v-a14b}
+      VIDEO_SIZE_IN_BILLIONS: ${VIDEO_SIZE_IN_BILLIONS:-}
+      VIDEO_QUANTIZATION: ${VIDEO_QUANTIZATION:-}
+      VIDEO_FALLBACK_MODEL: ${VIDEO_FALLBACK_MODEL:-Wan2.1-i2v-14B-480p}
+      VIDEO_LAYERWISE_CAST: ${VIDEO_LAYERWISE_CAST:-true}
+      VIDEO_CPU_OFFLOAD: ${VIDEO_CPU_OFFLOAD:-true}
+      VIDEO_GROUP_OFFLOAD: ${VIDEO_GROUP_OFFLOAD:-false}
+      VIDEO_USE_STREAM: ${VIDEO_USE_STREAM:-false}
+      VIDEO_MODEL_UID: ${VIDEO_MODEL_UID:-}
+      HF_HOME: /root/.cache/huggingface
+      TRANSFORMERS_CACHE: /root/.cache/huggingface
+    volumes:
+      - ./data:/data
+      - ./cache/huggingface:/root/.cache/huggingface
+      - ./cache/modelscope:/root/.cache/modelscope
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: ["gpu"]
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsSL http://localhost:9997/v1/models || exit 1"]
+    interval: 30s
+    timeout: 10s
+    retries: 5
+    restart: unless-stopped
+
