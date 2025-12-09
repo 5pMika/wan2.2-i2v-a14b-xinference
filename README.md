@@ -7,15 +7,43 @@ Containerized Xinference setup that auto-launches the Wan image-to-video model (
 - NVIDIA driver + `nvidia-container-toolkit`
 - GPU with ≥20GB VRAM recommended for 14B video models
 
-## Quick start
+## Quick start (no Compose)
+Build:
 ```bash
-docker compose build
-docker compose up -d
-docker compose logs -f xinference
+docker build -t wan2-2-i2v-a14b-xinference .
+```
+
+Run (GPU):
+```bash
+docker run --rm -d \
+  --name xinference \
+  --gpus all \
+  -p 9997:9997 \
+  -v $(pwd)/data:/data \
+  -v $(pwd)/cache/huggingface:/root/.cache/huggingface \
+  -v $(pwd)/cache/modelscope:/root/.cache/modelscope \
+  -e XINFERENCE_PORT=9997 \
+  -e XINFERENCE_HOST=0.0.0.0 \
+  -e ENABLE_S3_MODEL=1 \
+  -e MODEL_S3_BUCKET=noty3emlmi \
+  -e MODEL_S3_ENDPOINT=https://s3api-eu-ro-1.runpod.io \
+  -e MODEL_S3_PREFIX=wan2.2-i2v-a14b/ \
+  -e MODEL_LOCAL_PATH=/data/models/wan2.2-i2v-a14b \
+  -e AWS_ACCESS_KEY_ID=$AWS_ACCESS_KEY_ID \
+  -e AWS_SECRET_ACCESS_KEY=$AWS_SECRET_ACCESS_KEY \
+  -e VIDEO_MODEL_NAME=wan2.2-i2v-a14b \
+  -e VIDEO_MODEL_PATH=/data/models/wan2.2-i2v-a14b \
+  -e VIDEO_FALLBACK_MODEL=Wan2.1-i2v-14B-480p \
+  wan2-2-i2v-a14b-xinference
+```
+
+Logs:
+```bash
+docker logs -f xinference
 ```
 
 ## Configuration
-- Edit `compose.yaml` or set env vars to tune launch settings.
+- Tune via environment variables.
 - Persistent caches and models live in `./data` and `./cache/*` (mounted into the container).
 - Key environment variables (defaults in compose):
   - `VIDEO_MODEL_NAME` (default `wan2.2-i2v-a14b`; use `Wan2.1-i2v-14B-480p` or `Wan2.1-i2v-14B-720p` if 2.2 is unavailable)
@@ -24,9 +52,6 @@ docker compose logs -f xinference
   - `VIDEO_MODEL_ENGINE`, `VIDEO_MODEL_FORMAT`, `VIDEO_MODEL_PATH`, `VIDEO_SIZE_IN_BILLIONS`, `VIDEO_QUANTIZATION` (custom launches)
   - `AUTO_LAUNCH_MODEL` (set `0` to skip auto-launch)
 - Port mapping defaults to `9997` → `9997`.
-
-### GPU reservation
-Compose requests one NVIDIA GPU. Adjust `deploy.resources.reservations.devices[0].count` or remove it if your runtime handles GPUs implicitly.
 
 ## RunPod S3 network volume
 The bootstrap step verifies and syncs model files from S3 before launching:
