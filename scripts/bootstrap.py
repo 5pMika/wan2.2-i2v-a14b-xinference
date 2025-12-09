@@ -103,23 +103,31 @@ def ensure_s3_model() -> None:
             raise RuntimeError(f"S3 model check failed; missing keys: {missing}")
 
     paginator = s3.get_paginator("list_objects_v2")
-    found = False
-    for page in paginator.paginate(Bucket=bucket, Prefix=normalized_prefix):
-        for obj in page.get("Contents", []):
-            key = obj["Key"]
-            if key.endswith("/"):
-                continue
-            found = True
-            rel = key[len(normalized_prefix) :].lstrip("/") if normalized_prefix else key
-            target = os.path.join(local_path, rel)
-            os.makedirs(os.path.dirname(target), exist_ok=True)
-            if skip_existing and os.path.exists(target):
-                continue
-            print(f"[bootstrap] downloading {key} -> {target}", flush=True)
-            s3.download_file(bucket, key, target)
+    keys_to_fetch = []
 
-    if not found:
-        raise RuntimeError(f"S3 model check failed; no objects found at prefix '{normalized_prefix}' in bucket '{bucket}'.")
+    try:
+        for page in paginator.paginate(Bucket=bucket, Prefix=normalized_prefix):
+            for obj in page.get("Contents", []):
+                key = obj["Key"]
+                if key.endswith("/"):
+                    continue
+                rel = key[len(normalized_prefix) :].lstrip("/") if normalized_prefix else key
+                keys_to_fetch.append((key, rel))
+    except ClientError as exc:  # noqa: PERF203
+        raise RuntimeError(f"S3 model check failed while listing objects: {exc}")
+
+    if not keys_to_fetch:
+        raise RuntimeError(
+            f"S3 model check failed; no objects found at prefix '{normalized_prefix}' in bucket '{bucket}'."
+        )
+
+    for key, rel in keys_to_fetch:
+        target = os.path.join(local_path, rel)
+        os.makedirs(os.path.dirname(target), exist_ok=True)
+        if skip_existing and os.path.exists(target):
+            continue
+        print(f"[bootstrap] downloading {key} -> {target}", flush=True)
+        s3.download_file(bucket, key, target)
 
     print(f"[bootstrap] S3 model sync complete -> {local_path}", flush=True)
 
