@@ -12,6 +12,7 @@ RUN apt-get update && \
 
 RUN pip install --no-cache-dir \
     boto3 \
+    requests \
     fastapi \
     uvicorn[standard] \
     python-multipart \
@@ -23,4 +24,4 @@ COPY scripts/rp_handler.py /app/rp_handler.py
 
 EXPOSE 9997
 
-ENTRYPOINT ["python3", "/app/rp_handler.py"]
+CMD ["python", "-u", "/app/rp_handler.py"]
