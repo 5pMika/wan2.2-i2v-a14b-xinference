@@ -11,11 +11,8 @@ RUN apt-get update && \
 
 RUN pip install --no-cache-dir boto3
 
-COPY scripts/entrypoint.sh /app/entrypoint.sh
 COPY scripts/bootstrap.py /app/bootstrap.py
-
-RUN chmod +x /app/entrypoint.sh
 
 EXPOSE 9997
 
-ENTRYPOINT ["/app/entrypoint.sh"]
+ENTRYPOINT ["python3", "/app/bootstrap.py"]
