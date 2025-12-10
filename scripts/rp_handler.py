@@ -12,7 +12,6 @@ from bootstrap import (
     _fetch_image_from_url,
     configure_xinference_home,
     dbg_log,
-    exit_worker,
     launch_models,
     parse_bool,
     start_server,
@@ -44,15 +43,12 @@ def _init_runtime() -> None:
         endpoint = os.getenv("XINFERENCE_ENDPOINT", f"http://127.0.0.1:{port}")
         _xinference_endpoint = endpoint
 
-        try:
-            _server_proc = start_server(host, port, log_level)
-            wait_for_server(endpoint, server_proc=_server_proc)
-            auto_launch = parse_bool(os.getenv("AUTO_LAUNCH_MODEL", "1"))
-            if auto_launch:
-                launch_models(endpoint, _server_proc)
-        except BaseException as exc:  # noqa: BLE001
-            # Fail hard so RunPod restarts the worker.
-            exit_worker("handler init failed", exc)
+    try:
+        _server_proc = start_server(host, port, log_level)
+        wait_for_server(endpoint, server_proc=_server_proc)
+        auto_launch = parse_bool(os.getenv("AUTO_LAUNCH_MODEL", "1"))
+        if auto_launch:
+            launch_models(endpoint, _server_proc)
         _initialized = True
         dbg_log(
             hypothesis_id="INIT",
@@ -60,6 +56,14 @@ def _init_runtime() -> None:
             message="initialized runtime",
             data={"endpoint": endpoint, "model_ready": MODEL_READY},
         )
+    except BaseException as exc:  # noqa: BLE001
+        dbg_log(
+            hypothesis_id="INIT_ERR",
+            location="rp_handler.py:_init_runtime",
+            message="runtime init failed",
+            data={"error": str(exc)},
+        )
+        raise RuntimeError(f"handler init failed: {exc}") from exc
 
 
 def _ensure_model_uid() -> str:
@@ -110,19 +114,46 @@ def handler(job: Dict[str, Any]) -> Dict[str, Any]:
       - image_url: Optional[str]
       - image_base64: Optional[str]
     """
-    _init_runtime()
+    try:
+        _init_runtime()
+    except Exception as exc:  # noqa: BLE001
+        return {
+            "error": "init_failed",
+            "message": str(exc),
+            "ready": MODEL_READY,
+        }
+
     job_input = job.get("input") or {}
     prompt = job_input.get("prompt", "")
     image_url = job_input.get("image_url")
     image_b64 = job_input.get("image_base64")
 
     image_bytes: Optional[bytes] = None
-    if image_url:
-        image_bytes = _fetch_image_from_url(image_url)
-    elif image_b64:
-        image_bytes = _decode_base64_image(image_b64)
+    try:
+        if image_url:
+            image_bytes = _fetch_image_from_url(image_url)
+        elif image_b64:
+            image_bytes = _decode_base64_image(image_b64)
+    except Exception as exc:  # noqa: BLE001
+        dbg_log(
+            hypothesis_id="INPUT_ERR",
+            location="rp_handler.py:handler",
+            message="failed to load input image",
+            data={"error": str(exc)},
+        )
+        return {"error": "input_error", "message": str(exc), "ready": MODEL_READY}
 
-    uid = _ensure_model_uid()
+    try:
+        uid = _ensure_model_uid()
+    except Exception as exc:  # noqa: BLE001
+        dbg_log(
+            hypothesis_id="MODEL_ERR",
+            location="rp_handler.py:handler",
+            message="model not ready",
+            data={"error": str(exc)},
+        )
+        return {"error": "model_not_ready", "message": str(exc), "ready": MODEL_READY}
+
     api_timeout = int(os.getenv("API_HTTP_TIMEOUT", "600"))
 
     dbg_log(
@@ -132,8 +163,17 @@ def handler(job: Dict[str, Any]) -> Dict[str, Any]:
         data={"model_uid": uid, "has_image": bool(image_bytes), "prompt_len": len(prompt or "")},
     )
 
-    result = _call_xinference(uid, prompt, image_bytes, api_timeout)
-    return {"output": result, "model_uid": uid, "ready": MODEL_READY}
+    try:
+        result = _call_xinference(uid, prompt, image_bytes, api_timeout)
+        return {"output": result, "model_uid": uid, "ready": MODEL_READY}
+    except Exception as exc:  # noqa: BLE001
+        dbg_log(
+            hypothesis_id="INFER_ERR",
+            location="rp_handler.py:handler",
+            message="xinference call failed",
+            data={"error": str(exc)},
+        )
+        return {"error": "inference_error", "message": str(exc), "ready": MODEL_READY}
 
 
 def _shutdown() -> None:
