@@ -13,14 +13,40 @@ from botocore.exceptions import ClientError
 from xinference.client import Client
 
 
-LOG_PATH = (
-    r"c:\Users\mikas\OneDrive\Projects\PROJEKTIT\runpod\wan2.2-i2v-a14b-xinference\.cursor\debug.log"
-)
+def _default_log_path() -> Optional[str]:
+    """Resolve a log path that works both locally and on RunPod."""
+    env_path = os.getenv("DEBUG_LOG_PATH")
+    if env_path:
+        return env_path
+    # Prefer mounted volume if present; otherwise fall back to /data.
+    base = "/runpod-volume" if os.path.isdir("/runpod-volume") else "/data"
+    try:
+        Path(base).mkdir(parents=True, exist_ok=True)
+    except Exception:
+        return None
+    return os.path.join(base, "xinference-bootstrap-debug.log")
+
+
+LOG_PATH = _default_log_path()
 SESSION_ID = "debug-session"
+
+
+def log_runpod_error(kind: str, message: str, data: Optional[dict] = None) -> None:
+    """Emit an error line that shows up in RunPod logs and debug logs."""
+    payload = {"kind": kind, "message": message, "data": data or {}}
+    print(f"[bootstrap][error] {json.dumps(payload)}", flush=True)
+    dbg_log(
+        hypothesis_id="ERR",
+        location="bootstrap.py:log_runpod_error",
+        message=message,
+        data={"kind": kind, **(data or {})},
+    )
 
 
 def dbg_log(*, hypothesis_id: str, location: str, message: str, data: Optional[dict] = None, run_id: str = "run1") -> None:
     """Append a small NDJSON log line for debug mode."""
+    if not LOG_PATH:
+        return
     payload = {
         "sessionId": SESSION_ID,
         "runId": run_id,
@@ -59,6 +85,32 @@ def configure_xinference_home() -> str:
     return home
 
 
+def validate_env() -> None:
+    """Validate required env vars and log missing or incorrect values."""
+    required = ["MODEL_S3_BUCKET", "MODEL_S3_ENDPOINT", "AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY"]
+    missing = []
+    for key in required:
+        if not os.getenv(key):
+            log_runpod_error("missing_env", f"Required env var '{key}' is not set", {"env": key})
+            missing.append(key)
+
+    endpoint = os.getenv("MODEL_S3_ENDPOINT")
+    if endpoint and not (endpoint.startswith("http://") or endpoint.startswith("https://")):
+        log_runpod_error("bad_env", "MODEL_S3_ENDPOINT must start with http:// or https://", {"value": endpoint})
+
+    bucket = os.getenv("MODEL_S3_BUCKET")
+    if bucket and any(ch.isspace() for ch in bucket):
+        log_runpod_error("bad_env", "MODEL_S3_BUCKET cannot contain whitespace", {"value": bucket})
+
+    for key in ("AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY"):
+        val = os.getenv(key)
+        if val and len(val) < 8:
+            log_runpod_error("bad_env", f"{key} appears too short to be valid", {"env": key})
+
+    if missing:
+        raise RuntimeError(f"Missing required env vars: {', '.join(missing)}")
+
+
 def start_server(host: str, port: str, log_level: str) -> subprocess.Popen:
     cmd = ["xinference-local", "-H", host, "-p", str(port), "--log-level", log_level]
     print(f"[bootstrap] starting xinference-local: {' '.join(cmd)}", flush=True)
@@ -78,13 +130,15 @@ def stop_server(proc: Optional[subprocess.Popen]) -> None:
         pass
 
 
-def wait_for_server(endpoint: str, timeout: int = 300, interval: int = 3) -> None:
+def wait_for_server(endpoint: str, timeout: int = 300, interval: int = 3, server_proc: Optional[subprocess.Popen] = None) -> None:
     deadline = time.time() + timeout
     url = endpoint.rstrip("/") + "/v1/models"
     while time.time() < deadline:
+        if server_proc is not None and server_proc.poll() is not None:
+            raise RuntimeError("xinference-local exited before becoming ready; check container logs")
         try:
             response = requests.get(url, timeout=5)
-            if response.status_code < 500:
+            if 200 <= response.status_code < 300:
                 print(f"[bootstrap] xinference is ready ({response.status_code})", flush=True)
                 return
         except Exception as exc:  # noqa: BLE001
@@ -131,8 +185,11 @@ def ensure_s3_model() -> None:
         print("[bootstrap] S3 model sync disabled; skipping", flush=True)
         return
 
+    validate_env()
+
     bucket = os.getenv("MODEL_S3_BUCKET")
-    prefix = os.getenv("MODEL_S3_PREFIX", "").lstrip("/")
+    # Default to the actual network-volume folder layout if unset.
+    prefix = os.getenv("MODEL_S3_PREFIX", "Wan2.2-I2V-A14B-Diffusers/").lstrip("/")
     endpoint = os.getenv("MODEL_S3_ENDPOINT")
     region = os.getenv("MODEL_S3_REGION", "eu-ro-1")
     required_keys_env = os.getenv("MODEL_REQUIRE_KEYS", "")
@@ -149,6 +206,9 @@ def ensure_s3_model() -> None:
     else:
         local_path = default_local_path
     skip_existing = parse_bool(os.getenv("MODEL_SKIP_EXISTING", "1"))
+    # Keep Xinference model_path aligned with the synced location when the user did not override it.
+    if not os.getenv("VIDEO_MODEL_PATH"):
+        os.environ["VIDEO_MODEL_PATH"] = local_path
 
     if not bucket or not endpoint:
         raise RuntimeError("S3 model sync is enabled but MODEL_S3_BUCKET or MODEL_S3_ENDPOINT is missing.")
@@ -186,6 +246,11 @@ def ensure_s3_model() -> None:
             except ClientError as exc:  # noqa: PERF203
                 if exc.response.get("ResponseMetadata", {}).get("HTTPStatusCode") == 404:
                     missing.append(key_to_check)
+                    log_runpod_error(
+                        "missing_file",
+                        "Required model object not found in S3",
+                        {"key": key_to_check, "bucket": bucket},
+                    )
                 else:
                     raise
         if missing:
@@ -239,9 +304,24 @@ def ensure_s3_model() -> None:
         target = os.path.join(local_path, rel)
         os.makedirs(os.path.dirname(target), exist_ok=True)
         if skip_existing and os.path.exists(target):
-            continue
+            try:
+                head = s3.head_object(Bucket=bucket, Key=key)
+                remote_size = head.get("ContentLength")
+                local_size = os.path.getsize(target)
+                if remote_size is not None and remote_size == local_size:
+                    continue
+                print(f"[bootstrap] re-fetching {key} due to size mismatch (remote={remote_size}, local={local_size})", flush=True)
+            except Exception:
+                # If metadata check fails, fall through to download.
+                pass
+        tmp_target = f"{target}.tmp"
         print(f"[bootstrap] downloading {key} -> {target}", flush=True)
-        s3.download_file(bucket, key, target)
+        s3.download_file(bucket, key, tmp_target)
+        os.replace(tmp_target, target)
+
+    if not os.path.exists(local_path):
+        log_runpod_error("missing_file", "Local model path not found after sync", {"path": local_path})
+        raise RuntimeError(f"Local model path not found after sync: {local_path}")
 
     dbg_log(
         hypothesis_id="H4",
@@ -252,11 +332,11 @@ def ensure_s3_model() -> None:
     print(f"[bootstrap] S3 model sync complete -> {local_path}", flush=True)
 
 
-def launch_models(endpoint: str) -> None:
+def launch_models(endpoint: str, server_proc: Optional[subprocess.Popen]) -> None:
     effective_endpoint = endpoint or os.getenv("XINFERENCE_ENDPOINT", f"http://127.0.0.1:{os.getenv('XINFERENCE_PORT', '9997')}")
 
     ensure_s3_model()
-    wait_for_server(effective_endpoint)
+    wait_for_server(effective_endpoint, server_proc=server_proc)
 
     client = Client(effective_endpoint)
     launch_kwargs = build_launch_kwargs()
@@ -306,7 +386,7 @@ def main() -> None:
 
     try:
         if auto_launch:
-            launch_models(endpoint)
+            launch_models(endpoint, server_proc)
         server_proc.wait()
     except Exception:
         stop_server(server_proc)
