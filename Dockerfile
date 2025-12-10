@@ -10,10 +10,17 @@ RUN apt-get update && \
     apt-get install -y --no-install-recommends curl ca-certificates && \
     rm -rf /var/lib/apt/lists/*
 
-RUN pip install --no-cache-dir boto3
+RUN pip install --no-cache-dir \
+    boto3 \
+    fastapi \
+    uvicorn[standard] \
+    python-multipart \
+    httpx \
+    runpod
 
 COPY scripts/bootstrap.py /app/bootstrap.py
+COPY scripts/rp_handler.py /app/rp_handler.py
 
 EXPOSE 9997
 
-ENTRYPOINT ["python3", "/app/bootstrap.py"]
+ENTRYPOINT ["python3", "/app/rp_handler.py"]
