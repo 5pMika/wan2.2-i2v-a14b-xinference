@@ -114,6 +114,14 @@ def handler(job: Dict[str, Any]) -> Dict[str, Any]:
       - image_url: Optional[str]
       - image_base64: Optional[str]
     """
+    # Optionally fail fast instead of waiting on initialization/launch.
+    if not _initialized and parse_bool(os.getenv("FAST_FAIL_NOT_READY", "0")):
+        return {
+            "error": "not_ready",
+            "message": "handler is not initialized yet",
+            "ready": MODEL_READY,
+        }
+
     try:
         _init_runtime()
     except Exception as exc:  # noqa: BLE001
@@ -153,6 +161,15 @@ def handler(job: Dict[str, Any]) -> Dict[str, Any]:
             data={"error": str(exc)},
         )
         return {"error": "model_not_ready", "message": str(exc), "ready": MODEL_READY}
+
+    # If the model launch has not completed yet, let the caller know immediately.
+    if not MODEL_READY and parse_bool(os.getenv("FAST_FAIL_NOT_READY", "0")):
+        return {
+            "error": "not_ready",
+            "message": "model launch in progress",
+            "ready": MODEL_READY,
+            "model_uid": uid,
+        }
 
     api_timeout = int(os.getenv("API_HTTP_TIMEOUT", "600"))
 
